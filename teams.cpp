@@ -15,7 +15,6 @@ std::mutex cond_mut_TNT;
 std::condition_variable cond_TNT;
 
 void writeResTNT(uint64_t id, ContestResult& results, InfInt const & input, uint32_t& running) {
-    //std::cout << "memory = " << &running << " (thread)\n";
     uint64_t r = calcCollatz(input);
     //std::cout << "locking res_mut_TNT in thread " << id << "\n";
     res_mut_TNT.lock();
@@ -31,14 +30,12 @@ void writeResTNT(uint64_t id, ContestResult& results, InfInt const & input, uint
         //std::cout << "running = " << running << " (thread)\n";
     }
     //std::cout << "running = " << running << " (thread)\n";
-    //std::cout << "memory = " << &running << " (thread)\n";
     cond_TNT.notify_one();
 }
 
 ContestResult TeamNewThreads::runContestImpl(ContestInput const & contestInput)
 {
-    assert(getSize() > 0);
-
+    //std::cout << "TeamNewThreads starting with getSize = " << getSize() << "\n";
     ContestResult r;
     r.resize(contestInput.size());
 
@@ -60,26 +57,24 @@ ContestResult TeamNewThreads::runContestImpl(ContestInput const & contestInput)
             std::unique_lock<std::mutex> lock(cond_mut_TNT);
             cond_TNT.wait(lock, [this, &running, &running_now] {
                 running_now = running;
-                //std::cout << "memory = " << &running << " (main)\n";
                 //std::cout << "running = " << running << " (main)\n";
                 return running < getSize();
             });
             //std::cout << "unlocking cond_mut_TNT in main\n";
         }
-        //std::cout << "Creating " << getSize() - running_now << " new threads.\n";
-        for (uint32_t i = 0; i < getSize() - running_now; i++) {
-            threads[to_create - 1] = createThread(writeResTNT, to_create - 1, std::ref(r), contestInput[to_create - 1],
-                                                  std::ref(running));
-            //std::cout << "memory = " << &running << " (main)\n";
-            to_create--;
-        }
-        //std::cout << "to_create = " << to_create << "\n";
+        //std::cout << "Creating " << std::min(getSize() - running_now, to_create) << " new threads.\n";
         {
             //std::cout << "locking cond_mut_TNT in main\n";
             std::unique_lock<std::mutex> lock(cond_mut_TNT);
-            running += getSize() - running_now;
+            running += std::min(getSize() - running_now, to_create);
             //std::cout << "unlocking cond_mut_TNT in main\n";
         }
+        for (uint32_t i = 0; i < std::min(getSize() - running_now, to_create); i++) {
+            threads[to_create - 1] = createThread(writeResTNT, to_create - 1, std::ref(r), contestInput[to_create - 1],
+                                                  std::ref(running));
+            to_create--;
+        }
+        //std::cout << "to_create = " << to_create << "\n";
     }
     for (uint32_t i = 0; i < contestInput.size(); i++) {
         threads[i].join();
@@ -113,13 +108,14 @@ ContestResult TeamConstThreads::runContestImpl(ContestInput const & contestInput
 
     uint32_t work_per_thread = contestInput.size() / getSize();
     uint32_t additional_work = contestInput.size() - (work_per_thread) * getSize();
-    uint64_t idx_start = 0, idx_stop = work_per_thread + additional_work;
+    uint64_t idx_start = 0, idx_stop = work_per_thread;
     std::thread threads[getSize()];
     uint64_t j = 0;
     while (idx_stop <= contestInput.size()) {
         threads[j] = createThread(writeResTCT, std::ref(r), contestInput, idx_start, idx_stop);
         idx_start = idx_stop;
-        idx_stop += work_per_thread;
+        idx_stop += work_per_thread + (additional_work > 0 ? 1 : 0);
+        additional_work--;
         j++;
     }
     assert(j == getSize());
@@ -192,10 +188,10 @@ ContestResult TeamNewProcesses::runContest(ContestInput const & contestInput)
                     readAndWriteResTNP(pipe_dsc[0], r);
                 }
         }
-        if (to_create % 100 == 0)
-            std::cout << "to_create = " << to_create << "\n";
+        //if (to_create % 100 == 0)
+            //std::cout << "to_create = " << to_create << "\n";
     }
-    std::cout << "Exited while.\n";
+    //std::cout << "Exited while.\n";
     // not sure if the range of i below is correct
     for (uint32_t i = 0; i < std::min((uint32_t) contestInput.size(), getSize() - 1); i++) {
         readAndWriteResTNP(pipe_dsc[0], r);
@@ -205,24 +201,29 @@ ContestResult TeamNewProcesses::runContest(ContestInput const & contestInput)
     return r;
 }
 
+static uint32_t MAX_WRITE = PIPE_BUF / sizeof(std::pair<uint64_t, uint32_t>);
+
 ContestResult TeamConstProcesses::runContest(ContestInput const & contestInput)
 {
-    std::cout << "Team Const Processes starting\n";
+    //std::cout << "Team Const Processes starting\n" << "MAX_WRITE = " << MAX_WRITE << "\n";
     ContestResult r;
-    char const *isTCP = "1";
+    r.resize(contestInput.size());
     uint32_t work_per_process = contestInput.size() / getSize();
     uint32_t additional_work = contestInput.size() - (work_per_process) * getSize();
-    uint64_t idx_start = 0, idx_stop = work_per_process + additional_work;
 
-    int pipe_dsc[getSize()][2][2]; // a pair of pipes for every created process
+    int pipe_send_dsc[getSize()][2]; // pipes for sending info to new_process'es
+    int pipe_receive_dsc[2]; // pipe for receiving info from new_process'es
     char pipe_read_dsc_str[10], pipe_write_dsc_str[10];
-
+    pipe(pipe_receive_dsc);
+    sprintf(pipe_write_dsc_str, "%d", pipe_receive_dsc[1]);
+    int idx = 0;
     for (uint32_t i = 0; i < getSize(); i++) {
-        pipe(pipe_dsc[i][0]); // pipe for sending info to new_process
-        pipe(pipe_dsc[i][1]); // pipe for receiving info from new_process
-        sprintf(pipe_read_dsc_str, "%d", pipe_dsc[i][0][0]);
-        sprintf(pipe_write_dsc_str, "%d", pipe_dsc[i][1][1]);
-        std::string work = std::to_string(idx_stop - idx_start);
+        pipe(pipe_send_dsc[i]);
+        sprintf(pipe_read_dsc_str, "%d", pipe_send_dsc[i][0]);
+        //std::cout << "send pipe read dsc = " << pipe_send_dsc[i][0] << ", write dsc = " << pipe_send_dsc[i][1] << "\n";
+        std::string id = std::to_string(i);
+        char const *id_str = id.c_str();
+        std::string work = std::to_string(work_per_process + (i == 0 ? additional_work : 0));
         char const *work_str = work.c_str();
 
         /*std::cout << "Descriptors (main):\n";
@@ -230,46 +231,68 @@ ContestResult TeamConstProcesses::runContest(ContestInput const & contestInput)
         std::cout << ", dsc[i][1][0] = " << pipe_dsc[i][1][0] << ", dsc[i][1][1] = " << pipe_dsc[i][1][1] << "\n";
         */
         std::cout << "Writing input for the new_process (main)\n";
-        for (int j = idx_start; j < idx_stop; j++) {
-            if (j % 100 == 0) std::cout << "j = " << j << "\n";
-            std::pair<InfInt, uint32_t> input = std::make_pair(contestInput[j], j);
-            if (write(pipe_dsc[i][0][1], &input, sizeof(input)) != sizeof(input)) {
+        for (int j = 0; j < std::min(work_per_process + (i < additional_work ? 1 : 0), MAX_WRITE); j++) {
+            std::pair<uint64_t, uint32_t> input = std::make_pair(contestInput[idx].toLongLong(), idx);
+            if (write(pipe_send_dsc[i][1], &input, sizeof(input)) != sizeof(input)) {
                 std::cout << "Error in write\n";
                 exit(-1);
             }
+            idx++;
         }
 
-        /*std::vector<InfInt> input(contestInput.begin() + idx_start, contestInput.begin() + idx_stop);
-        assert(sizeof(input) <= PIPE_BUF);
-        if (write(pipe_dsc[i][0][1], &input, sizeof(input)) != sizeof(input)) {
-            std::cout << "Error in write\n";
-            exit(-1);
-        }*/
-        std::cout << "Doing fork() (main)\n";
+        //std::cout << "Doing fork() (main)\n";
         switch (fork()) {
             case -1:
                 std::cout << "Error in fork\n";
                 exit(-1);
 
             case 0:
-                std::cout << "I'm a new process\n";
+                //std::cout << "I'm a new process\n";
                 //close(pipe_dsc[i][0][1]);
                 //close(pipe_dsc[i][1][0]);
-                execl("./new_process", "new_process", pipe_read_dsc_str, pipe_write_dsc_str, work_str, isTCP, NULL);
+                execl("./new_process", "new_process", pipe_read_dsc_str, pipe_write_dsc_str, id_str, work_str, NULL);
 
             default:
                 //close(pipe_dsc[i][0][0]);
                 //close(pipe_dsc[i][1][1]);
                 ;
         }
-
-        idx_start = idx_stop;
-        idx_stop += work_per_process;
     }
+    std::vector<int> work_left(getSize());
+    for (uint32_t i = 0; i < getSize(); i++)
+        work_left[i] = work_per_process + (i < additional_work ? 1 : 0) - MAX_WRITE;
+
+    for (uint32_t i = 0; i < contestInput.size(); i++) {
+        std::tuple<uint64_t, uint32_t, int> single_result;
+        //std::cout << "Reading single result ...\n";
+        if (read(pipe_receive_dsc[0], &single_result, sizeof(single_result)) != sizeof(single_result)) {
+            std::cout << "Error in read (main)\n";
+            exit(-1);
+        }
+        uint64_t res = std::get<0>(single_result);
+        uint32_t res_idx = std::get<1>(single_result);
+        int process_id = std::get<2>(single_result);
+        //std::cout << "Single result from process " << process_id << " equals " << res << "\n";
+        if (work_left[process_id] > 0) {
+            //std::cout << "New input: contestInput[idx] = " << contestInput[idx] << "\n";
+            std::pair<uint64_t, uint32_t> input = std::make_pair(contestInput[idx].toLongLong(), idx);
+            //if (idx > 2990) std::cout << "Writing input, idx = " << idx << "\n";
+            if (write(pipe_send_dsc[process_id][1], &input, sizeof(input)) != sizeof(input)) {
+                std::cout << "Error in write (main)\n";
+                exit(-1);
+            }
+            work_left[process_id]--;
+            idx++;
+        }
+        //std::cout << "Updating result to res_idx = " << res_idx << " ...";
+        r[res_idx] = res;
+        //std::cout << " updated\n";
+    }
+    /*
     std::cout << "TCP result: ";
     for (uint32_t i = 0; i < getSize(); i++) {
         std::vector<uint64_t> partial_result;
-        if (read(pipe_dsc[i][1][0], &partial_result, SSIZE_MAX) == -1) {
+        if (read(pipe_receive_dsc[0], &partial_result, SSIZE_MAX) == -1) {
             std::cout << "Error in read (main), errno = " << errno << "\n";
             exit(-1);
         }
@@ -279,7 +302,8 @@ ContestResult TeamConstProcesses::runContest(ContestInput const & contestInput)
         }
     }
     std::cout << "\n";
-    return r;
+    */
+     return r;
 }
 
 ContestResult TeamAsync::runContest(ContestInput const & contestInput)
