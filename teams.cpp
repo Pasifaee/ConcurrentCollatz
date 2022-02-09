@@ -107,8 +107,10 @@ ContestResult TeamConstThreads::runContestImpl(ContestInput const & contestInput
     r.resize(contestInput.size());
 
     uint32_t work_per_thread = contestInput.size() / getSize();
-    uint32_t additional_work = contestInput.size() - (work_per_thread) * getSize();
-    uint64_t idx_start = 0, idx_stop = work_per_thread;
+    int additional_work = contestInput.size() - (work_per_thread) * getSize();
+    std::cout << "work_per_thread = " << work_per_thread << ", additional_work = " << additional_work << "\n";
+    uint64_t idx_start = 0, idx_stop = work_per_thread + (additional_work > 0 ? 1 : 0);
+    additional_work--;
     std::thread threads[getSize()];
     uint64_t j = 0;
     while (idx_stop <= contestInput.size()) {
@@ -118,6 +120,7 @@ ContestResult TeamConstThreads::runContestImpl(ContestInput const & contestInput
         additional_work--;
         j++;
     }
+    std::cout << "j = " << j << "\n";
     assert(j == getSize());
     for (uint64_t i = 0; i < getSize(); i++) {
         threads[i].join();
@@ -223,14 +226,14 @@ ContestResult TeamConstProcesses::runContest(ContestInput const & contestInput)
         //std::cout << "send pipe read dsc = " << pipe_send_dsc[i][0] << ", write dsc = " << pipe_send_dsc[i][1] << "\n";
         std::string id = std::to_string(i);
         char const *id_str = id.c_str();
-        std::string work = std::to_string(work_per_process + (i == 0 ? additional_work : 0));
+        std::string work = std::to_string(work_per_process + (i < additional_work ? 1 : 0));
         char const *work_str = work.c_str();
 
         /*std::cout << "Descriptors (main):\n";
         std::cout << "dsc[i][0][0] = " << pipe_dsc[i][0][0] << ", dsc[i][0][1] = " << pipe_dsc[i][0][1];
         std::cout << ", dsc[i][1][0] = " << pipe_dsc[i][1][0] << ", dsc[i][1][1] = " << pipe_dsc[i][1][1] << "\n";
         */
-        std::cout << "Writing input for the new_process (main)\n";
+        //std::cout << "Writing input for the new_process (main)\n";
         for (int j = 0; j < std::min(work_per_process + (i < additional_work ? 1 : 0), MAX_WRITE); j++) {
             std::pair<uint64_t, uint32_t> input = std::make_pair(contestInput[idx].toLongLong(), idx);
             if (write(pipe_send_dsc[i][1], &input, sizeof(input)) != sizeof(input)) {
@@ -259,8 +262,10 @@ ContestResult TeamConstProcesses::runContest(ContestInput const & contestInput)
         }
     }
     std::vector<int> work_left(getSize());
-    for (uint32_t i = 0; i < getSize(); i++)
+    for (uint32_t i = 0; i < getSize(); i++) {
         work_left[i] = work_per_process + (i < additional_work ? 1 : 0) - MAX_WRITE;
+        //std::cout << "work_left[" << i << "] = " << work_left[i] << "\n";
+    }
 
     for (uint32_t i = 0; i < contestInput.size(); i++) {
         std::tuple<uint64_t, uint32_t, int> single_result;

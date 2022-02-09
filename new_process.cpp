@@ -34,14 +34,14 @@ int main(int argc, char *argv[])
 
         for (int i = 0; i < work; i++) {
             //std::cout << "Read dsc = " << read_dsc << ", sizeof(input) = " << sizeof(input) << "\n";
-            //std::cout << "Reading input ... (new_process)\n";
+            //std::cout << "Reading input ... (new_process " << id << ")\n";
             if (read(read_dsc, &input, sizeof(input)) != sizeof(input)) {
                 std::cout << "Error in read (new_process), errno = " << errno << "\n";
                 exit(-1);
             }
             result = std::make_tuple(calcCollatz(input.first), input.second, id);
             assert(sizeof(result) <= PIPE_BUF);
-            //std::cout << "Writing single result ... (new_process)\n";
+            //std::cout << "Writing single result ... (new_process " << id << ")\n";
             if (write(write_dsc, &result, sizeof(result)) != sizeof(result)) {
                 std::cout << "Error in write\n";
                 exit(-1);
