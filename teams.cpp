@@ -3,13 +3,12 @@
 #include <future>
 #include <unistd.h>
 #include <sys/wait.h>
+#include <sys/mman.h>
 
 #include "teams.hpp"
 #include "contest.hpp"
 #include "collatz.hpp"
 
-// isn't there a problem with global variables? I mean, what happens when there are multiple teams,
-// and they're all using same variables?
 std::mutex res_mut_TNT;
 std::mutex cond_mut_TNT;
 std::condition_variable cond_TNT;
@@ -20,7 +19,7 @@ uint64_t calcCollatzX(InfInt const & n, std::shared_ptr<SharedResults>& sharedRe
         return 0;
     }
     uint64_t res;
-    if (sharedResults->tryGetResult(n)) { // if sharedResults either have n calculated or are currently calculating
+    if (sharedResults->tryGetResult(n)) {
         return sharedResults->getResult(n);
     }
     else { // if sharedResults haven't calculated n
@@ -34,6 +33,32 @@ uint64_t calcCollatzX(InfInt const & n, std::shared_ptr<SharedResults>& sharedRe
         else {
             // here we write result to the shared results
             res = calcCollatzX(n * 3 + 1, sharedResults) + 1;
+            sharedResults->pushResult(n, res);
+            return res;
+        }
+    }
+}
+
+uint64_t calcCollatzX_processes(InfInt const & n, SharedResults* sharedResults) {
+    assert(n > 0);
+    if (n == 1) {
+        return 0;
+    }
+    uint64_t res;
+    if (sharedResults->tryGetResult(n)) { // if sharedResults either have n calculated or are currently calculating
+        return sharedResults->getResult(n);
+    }
+    else { // if sharedResults haven't calculated n
+        // now we're responsible for calulating n and writing it to the sharedResults
+        if (n % 2 == 0) {
+            // here we write result to the shared results
+            res = calcCollatzX_processes(n / 2, sharedResults) + 1;
+            sharedResults->pushResult(n, res);
+            return res;
+        }
+        else {
+            // here we write result to the shared results
+            res = calcCollatzX_processes(n * 3 + 1, sharedResults) + 1;
             sharedResults->pushResult(n, res);
             return res;
         }
@@ -65,11 +90,11 @@ void writeResTNT(uint64_t id, ContestResult& results, InfInt const & input, uint
 
 ContestResult TeamNewThreads::runContestImpl(ContestInput const & contestInput)
 {
-    std::cout << "Input: \n";
+    /*std::cout << "Input: \n";
     for (int i = 0; i < contestInput.size(); i++) {
         std::cout << contestInput[i] << " ";
     }
-    std::cout << "\n";
+    std::cout << "\n";*/
 
     //std::cout << "TeamNewThreads starting with getSize = " << getSize() << "\n";
     ContestResult r;
@@ -206,6 +231,23 @@ void readAndWriteResTNP(int read_dsc, std::vector<uint64_t>& r) {
     //wait(0);
 }
 
+void new_process_TNP(int write_dsc, InfInt input, int idx, SharedResults* shR) {
+    uint64_t result;
+    if (shR) {
+        result = calcCollatzX_processes(input, shR);
+    }
+    else {
+        result = calcCollatz(input);
+    }
+    std::pair<uint64_t, uint32_t> to_send = std::make_pair(result, idx);
+    assert(sizeof(to_send) <= PIPE_BUF);
+
+    if (write(write_dsc, &to_send, sizeof(to_send)) != sizeof(to_send)) {
+        std::cout << "Error in write\n";
+        exit(-1);
+    }
+}
+
 ContestResult TeamNewProcesses::runContest(ContestInput const & contestInput)
 {
     ContestResult r;
@@ -216,6 +258,24 @@ ContestResult TeamNewProcesses::runContest(ContestInput const & contestInput)
 
     pipe(pipe_dsc);
     sprintf(pipe_write_dsc_str, "%d", pipe_dsc[1]);
+
+    // Shared memory
+    SharedResults *shR = NULL;
+    if (getSharedResults()) {
+        int fd_memory = -1; /* deskryptor dla pamięci*/
+        int flags, prot;
+        pid_t pid;
+
+        //std::cout <<"Wielkość strony to " << sysconf(_SC_PAGE_SIZE) << "\n";
+
+        prot = PROT_READ | PROT_WRITE;
+        flags = MAP_SHARED | MAP_ANONYMOUS; // nie ma pliku, fd winno być -1
+        //flags = MAP_PRIVATE;
+        // zarezerwuj dwie strony
+        shR = (SharedResults *) mmap(NULL, sizeof(SharedResults), prot, flags,
+                                     fd_memory, 0);
+        shR = getSharedResults().get();
+    }
 
     while (to_create > 0) {
         InfInt input = contestInput[to_create - 1];
@@ -231,7 +291,9 @@ ContestResult TeamNewProcesses::runContest(ContestInput const & contestInput)
 
             case 0:
                 close(pipe_dsc[0]);
-                execl("./new_process", "new_process", pipe_write_dsc_str, input_str, idx, NULL);
+                new_process_TNP(pipe_dsc[1], contestInput[to_create - 1], to_create - 1, shR);
+                //execl("./new_process", "new_process", pipe_write_dsc_str, input_str, idx, NULL);
+                exit(0);
 
             default:
                 to_create--;
@@ -255,6 +317,62 @@ ContestResult TeamNewProcesses::runContest(ContestInput const & contestInput)
 
 static long MAX_WRITE = PIPE_BUF / sizeof(std::pair<uint64_t, uint32_t>);
 
+void new_process_TCP(int read_dsc, int write_dsc, int id, int work, SharedResults *shR) {
+    //std::pair<uint64_t, uint32_t> input;
+    std::tuple<uint64_t, uint32_t, int> result; // result, index, process id
+
+    for (int i = 0; i < work; i++) {
+        //std::cout << "Read dsc = " << read_dsc << ", sizeof(input) = " << sizeof(input) << "\n";
+        std::string singleInput_str;
+        std::string idx_str;
+        char c;
+        //std::cout << "Reading single input ... (new_process " << id << ")\n";
+        bool reading_idx = true;
+        while (true) {
+            if (read(read_dsc, &c, 1) != 1) {
+                std::cout << "Error in read (new_process), errno = " << errno << "\n";
+                exit(-1);
+            }
+            if (c == 0) {
+                assert(!reading_idx);
+                break;
+            }
+            else if (c == '-') {
+                assert(reading_idx);
+                reading_idx = false;
+            }
+            else if (reading_idx) {
+                idx_str.push_back(c);
+            }
+            else {
+                singleInput_str.push_back(c);
+            }
+        }
+        int idx = std::stoi(idx_str);
+        InfInt singleInput(singleInput_str);
+        //std::cout << "idx_str = " << idx_str << ", singleInput_str = " << singleInput_str << "\n";
+        //std::cout << "idx = " << idx << ", singleInput = " << singleInput << "\n";
+        /*if (read(read_dsc, &input_str, sizeof(input)) != sizeof(input)) {
+            std::cout << "Error in read (new_process), errno = " << errno << "\n";
+            exit(-1);
+        }*/
+        uint64_t res;
+        if (shR) {
+            res = calcCollatzX_processes(singleInput, shR);
+        }
+        else {
+            res = calcCollatz(singleInput);
+        }
+        result = std::make_tuple(res, idx, id);
+        assert(sizeof(result) <= PIPE_BUF);
+        //std::cout << "Writing single result ... (new_process " << id << ")\n";
+        if (write(write_dsc, &result, sizeof(result)) != sizeof(result)) {
+            std::cout << "Error in write\n";
+            exit(-1);
+        }
+    }
+}
+
 ContestResult TeamConstProcesses::runContest(ContestInput const & contestInput)
 {
     //std::cout << "Team Const Processes starting\n" << "MAX_WRITE = " << MAX_WRITE << "\n";
@@ -275,8 +393,9 @@ ContestResult TeamConstProcesses::runContest(ContestInput const & contestInput)
         //std::cout << "send pipe read dsc = " << pipe_send_dsc[i][0] << ", write dsc = " << pipe_send_dsc[i][1] << "\n";
         std::string id = std::to_string(i);
         char const *id_str = id.c_str();
-        std::string work = std::to_string(work_per_process + (i < additional_work ? 1 : 0));
-        char const *work_str = work.c_str();
+        int work = work_per_process + (i < additional_work ? 1 : 0);
+        std::string work_tmp_str = std::to_string(work);
+        char const *work_str = work_tmp_str.c_str();
 
         //std::cout << "Writing input for the new_process (main)\n";
         for (int j = 0; j < std::min(work_per_process + (i < additional_work ? 1 : 0), (uint32_t) MAX_WRITE); j++) {
@@ -293,6 +412,24 @@ ContestResult TeamConstProcesses::runContest(ContestInput const & contestInput)
             idx++;
         }
 
+        // Shared memory
+        SharedResults *shR = NULL;
+        if (getSharedResults()) {
+            int fd_memory = -1; /* deskryptor dla pamięci*/
+            int flags, prot;
+            pid_t pid;
+
+            //std::cout <<"Wielkość strony to " << sysconf(_SC_PAGE_SIZE) << "\n";
+
+            prot = PROT_READ | PROT_WRITE;
+            flags = MAP_SHARED | MAP_ANONYMOUS; // nie ma pliku, fd winno być -1
+            //flags = MAP_PRIVATE;
+            // zarezerwuj dwie strony
+            shR = (SharedResults *) mmap(NULL, sizeof(SharedResults), prot, flags,
+                                                   fd_memory, 0);
+            shR = getSharedResults().get();
+        }
+
         //std::cout << "Doing fork() (main)\n";
         switch (fork()) {
             case -1:
@@ -302,8 +439,9 @@ ContestResult TeamConstProcesses::runContest(ContestInput const & contestInput)
             case 0:
                 close(pipe_send_dsc[i][1]);
                 close(pipe_receive_dsc[0]);
-                execl("./new_process", "new_process", pipe_read_dsc_str, pipe_write_dsc_str, id_str, work_str, NULL);
-
+                new_process_TCP(pipe_send_dsc[i][0], pipe_receive_dsc[1], i, work, shR);
+                //execl("./new_process", "new_process", pipe_read_dsc_str, pipe_write_dsc_str, id_str, work_str, NULL);
+                exit(0);
             default:
                 close(pipe_send_dsc[i][0]);
         }
