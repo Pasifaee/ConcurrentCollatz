@@ -14,8 +14,38 @@ std::mutex res_mut_TNT;
 std::mutex cond_mut_TNT;
 std::condition_variable cond_TNT;
 
-void writeResTNT(uint64_t id, ContestResult& results, InfInt const & input, uint32_t& running) {
-    uint64_t r = calcCollatz(input);
+uint64_t calcCollatzX(InfInt const & n, std::shared_ptr<SharedResults>& sharedResults) {
+    assert(n > 0);
+    if (n == 1) {
+        return 0;
+    }
+    uint64_t res;
+    if (sharedResults->tryGetResult(n)) { // if sharedResults either have n calculated or are currently calculating
+        return sharedResults->getResult(n);
+    }
+    else { // if sharedResults haven't calculated n
+        // now we're responsible for calulating n and writing it to the sharedResults
+        if (n % 2 == 0) {
+            // here we write result to the shared results
+            res = calcCollatzX(n / 2, sharedResults) + 1;
+            sharedResults->pushResult(n, res);
+            return res;
+        }
+        else {
+            // here we write result to the shared results
+            res = calcCollatzX(n * 3 + 1, sharedResults) + 1;
+            sharedResults->pushResult(n, res);
+            return res;
+        }
+    }
+}
+
+void writeResTNT(uint64_t id, ContestResult& results, InfInt const & input, uint32_t& running, std::shared_ptr<SharedResults> sharedResults) {
+    uint64_t r;
+    if (sharedResults)
+        r = calcCollatzX(input, sharedResults);
+    else
+        r = calcCollatz(input);
     //std::cout << "locking res_mut_TNT in thread " << id << "\n";
     res_mut_TNT.lock();
     results[id] = r;
@@ -51,7 +81,7 @@ ContestResult TeamNewThreads::runContestImpl(ContestInput const & contestInput)
     // Create min(to_create, getSize()) threads.
     for (int i = 0; i < std::min(to_create, getSize()); i++) {
         threads[to_create - 1] = createThread(writeResTNT, to_create - 1, std::ref(r),
-                                              contestInput[to_create - 1], std::ref(running));
+                                              contestInput[to_create - 1], std::ref(running), getSharedResults());
         to_create--;
         running++;
     }
@@ -77,7 +107,7 @@ ContestResult TeamNewThreads::runContestImpl(ContestInput const & contestInput)
         }
         for (uint32_t i = 0; i < std::min(getSize() - running_now, to_create); i++) {
             threads[to_create - 1] = createThread(writeResTNT, to_create - 1, std::ref(r), contestInput[to_create - 1],
-                                                  std::ref(running));
+                                                  std::ref(running), getSharedResults());
             to_create--;
         }
         //std::cout << "to_create = " << to_create << "\n";
@@ -96,9 +126,15 @@ ContestResult TeamNewThreads::runContestImpl(ContestInput const & contestInput)
 
 std::mutex res_mut_TCT;
 
-void writeResTCT(ContestResult& results, ContestInput contestInput, uint64_t idx_start, uint64_t idx_stop) {
+void writeResTCT(ContestResult& results, ContestInput contestInput, uint64_t idx_start, uint64_t idx_stop, std::shared_ptr<SharedResults> sharedResults) {
     for (uint64_t i = idx_start; i < idx_stop; i++) {
-        uint64_t r = calcCollatz(contestInput[i]);
+        uint64_t r;
+        if (sharedResults) {
+            r = calcCollatzX(contestInput[i], sharedResults);
+        }
+        else {
+            r = calcCollatz(contestInput[i]);
+        }
         res_mut_TCT.lock();
         results[i] = r;
         res_mut_TCT.unlock();
@@ -122,7 +158,7 @@ ContestResult TeamConstThreads::runContestImpl(ContestInput const & contestInput
     uint64_t j = 0;
     while (idx_stop <= contestInput.size() && j < getSize()) {
         //std::cout << "idx_stop = " << idx_stop << "\n";
-        threads[j] = createThread(writeResTCT, std::ref(r), contestInput, idx_start, idx_stop);
+        threads[j] = createThread(writeResTCT, std::ref(r), contestInput, idx_start, idx_stop, getSharedResults());
         idx_start = idx_stop;
         idx_stop += work_per_thread + (additional_work > 0 ? 1 : 0);
         if (additional_work > 0)
@@ -144,7 +180,12 @@ ContestResult TeamPool::runContest(ContestInput const & contestInput)
     cxxpool::thread_pool pool{getSize()};
     std::vector<std::future<uint64_t>> results;
     for (uint32_t i = 0; i < contestInput.size(); i++) {
-        results.push_back(pool.push(calcCollatz, contestInput[i]));
+        if (getSharedResults()) {
+            results.push_back(pool.push(calcCollatzX, contestInput[i], getSharedResults()));
+        }
+        else {
+            results.push_back(pool.push(calcCollatz, contestInput[i]));
+        }
     }
 
     for (uint32_t i = 0; i < contestInput.size(); i++) {
@@ -155,7 +196,6 @@ ContestResult TeamPool::runContest(ContestInput const & contestInput)
 }
 
 void readAndWriteResTNP(int read_dsc, std::vector<uint64_t>& r) {
-    //std::cout << "Waiting for one of the processes to end.\n";
     std::pair<uint64_t, uint32_t> result;
     //std::cout << "Reading from the pipe.\n";
     if (read(read_dsc, &result, sizeof(result)) != sizeof(result)) {
@@ -163,7 +203,7 @@ void readAndWriteResTNP(int read_dsc, std::vector<uint64_t>& r) {
         exit(-1);
     }
     r[result.second] = result.first;
-    wait(0);
+    //wait(0);
 }
 
 ContestResult TeamNewProcesses::runContest(ContestInput const & contestInput)
@@ -194,7 +234,6 @@ ContestResult TeamNewProcesses::runContest(ContestInput const & contestInput)
                 execl("./new_process", "new_process", pipe_write_dsc_str, input_str, idx, NULL);
 
             default:
-                // what if child processes would take all the space in the pipe buffer?
                 to_create--;
                 if (contestInput.size() - to_create >= getSize()) {
                     readAndWriteResTNP(pipe_dsc[0], r);
@@ -208,8 +247,9 @@ ContestResult TeamNewProcesses::runContest(ContestInput const & contestInput)
     for (uint32_t i = 0; i < std::min((uint32_t) contestInput.size(), getSize() - 1); i++) {
         readAndWriteResTNP(pipe_dsc[0], r);
     }
+    for (uint32_t i = 0; i < contestInput.size(); i++)
+        wait(0);
 
-    close(pipe_dsc[1]);
     return r;
 }
 
@@ -260,15 +300,12 @@ ContestResult TeamConstProcesses::runContest(ContestInput const & contestInput)
                 exit(-1);
 
             case 0:
-                //std::cout << "I'm a new process\n";
-                //close(pipe_dsc[i][0][1]);
-                //close(pipe_dsc[i][1][0]);
+                close(pipe_send_dsc[i][1]);
+                close(pipe_receive_dsc[0]);
                 execl("./new_process", "new_process", pipe_read_dsc_str, pipe_write_dsc_str, id_str, work_str, NULL);
 
             default:
-                //close(pipe_dsc[i][0][0]);
-                //close(pipe_dsc[i][1][1]);
-                ;
+                close(pipe_send_dsc[i][0]);
         }
     }
     std::vector<long> work_left(getSize());
@@ -319,8 +356,14 @@ ContestResult TeamAsync::runContest(ContestInput const & contestInput)
 {
     ContestResult r;
     std::vector<std::future<uint64_t>> results;
+    std::shared_ptr<SharedResults> sharedResults = getSharedResults();
     for (auto singleInput : contestInput) {
-        results.push_back(std::async(calcCollatz, singleInput));
+        if (sharedResults) {
+            results.push_back(std::async(calcCollatzX, singleInput, std::ref(sharedResults)));
+        }
+        else {
+            results.push_back(std::async(calcCollatz, singleInput));
+        }
     }
     for (auto &singleResult : results) {
         r.push_back(singleResult.get());

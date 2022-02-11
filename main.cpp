@@ -14,9 +14,9 @@ int main(int argc, char ** argv)
     auto totalStartStop = totalTimer.scopedStart();
 
     std::vector<std::shared_ptr<ContestGenerator>> generators = {
-        std::shared_ptr<ContestGenerator>(new SameNumberContestGenerator{}),
+        //std::shared_ptr<ContestGenerator>(new SameNumberContestGenerator{}),
         //std::shared_ptr<ContestGenerator>(new ShortNumberContestGenerator{}),
-        //std::shared_ptr<ContestGenerator>(new LongNumberContestGenerator{}),
+        std::shared_ptr<ContestGenerator>(new LongNumberContestGenerator{}),
     };
 
     std::vector<std::shared_ptr<Team>> teams;
@@ -25,13 +25,13 @@ int main(int argc, char ** argv)
     {
         for (uint32_t numWorkers : {1,2,3,4,7,10})
         {
-            teams.push_back(std::shared_ptr<Team>(new TeamNewThreads{numWorkers, share}));
-            teams.push_back(std::shared_ptr<Team>(new TeamConstThreads{numWorkers, share}));
-            teams.push_back(std::shared_ptr<Team>(new TeamPool{numWorkers, share}));  
-            teams.push_back(std::shared_ptr<Team>(new TeamNewProcesses{numWorkers, share}));
+            //teams.push_back(std::shared_ptr<Team>(new TeamNewThreads{numWorkers, share}));
+            //teams.push_back(std::shared_ptr<Team>(new TeamConstThreads{numWorkers, share}));
+            //teams.push_back(std::shared_ptr<Team>(new TeamPool{numWorkers, share}));
+            //teams.push_back(std::shared_ptr<Team>(new TeamNewProcesses{numWorkers, share}));
             teams.push_back(std::shared_ptr<Team>(new TeamConstProcesses{numWorkers, share}));
         }
-        teams.push_back(std::shared_ptr<Team>(new TeamAsync{1, share}));
+        //teams.push_back(std::shared_ptr<Team>(new TeamAsync{1, share}));
     }
 
     for (auto generator : generators)
